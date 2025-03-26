@@ -1,0 +1,4 @@
+[console_scripts]
+gridfs_fuse = gridfs_fuse.main:main
+mount.gridfs = gridfs_fuse.main:_mount_fuse_main
+
