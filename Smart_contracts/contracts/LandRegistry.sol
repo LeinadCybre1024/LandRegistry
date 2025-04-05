@@ -3,21 +3,22 @@ pragma solidity >=0.4.22 <0.9.0;
 
 
 import "./Properties.sol";
+import "./Users.sol";  // Add this import
 
-contract LandRegistry{
-
+contract LandRegistry {
     address private contractOwner;
     address private transferOwnershipContractAddress;
     bool private transferOwnershipContractAddressUpdated = false;
 
     Property public propertiesContract;
+    Users public usersContract;  // Add this declaration
     
-    
-    constructor(){
+    constructor(address _usersContractAddress) {  // Update constructor
         contractOwner = msg.sender;
         transferOwnershipContractAddress = address(0);
         transferOwnershipContractAddressUpdated = false;
         propertiesContract = new Property();
+        usersContract = Users(_usersContractAddress);  // Initialize usersContract
     }
 
     // modifiers 
@@ -142,6 +143,8 @@ contract LandRegistry{
 
         return propertiesContract.getLandDetailsAsStruct(_propertyId);
     }
+
+    
 
 
 
