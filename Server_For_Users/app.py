@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request, session, redirect
+from flask import Flask, jsonify, request, session, redirect, send_file
 from pymongo import MongoClient
 import gridfs
 from bson import ObjectId
@@ -10,6 +10,15 @@ from datetime import datetime
 import json
 import base64
 from datetime import timedelta  # Add this with your other imports
+from web3 import Web3
+from web3.middleware import geth_poa_middleware
+import uuid
+
+# Configure upload settings
+UPLOAD_FOLDER = 'uploads/properties'
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'pdf'}
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
 
 app = Flask(__name__)
 app.secret_key = b'_5#y2L"F4Q8z\n\xec]/'
@@ -37,49 +46,245 @@ USER_ROLES = {
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg'}
 
-def allowed_file(filename):
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=1)
 
+def allowed_file(filename):
+    return '.' in filename and  filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+@app.route('/admin/users/search', methods=['GET'])
+def search_users():
+    try:
+        search_term = request.args.get('q')
+        if not search_term:
+            return jsonify({"status": "error", "message": "Search term is required"}), 400
+
+        # Search by name or wallet address (case insensitive)
+        query = {
+            "$or": [
+                {"firstName": {"$regex": search_term, "$options": "i"}},
+                {"lastName": {"$regex": search_term, "$options": "i"}},
+                {"walletAddress": {"$regex": search_term, "$options": "i"}}
+            ],
+            "status": "active"  # Only show active users
+        }
+
+        # Include only users that have either firstName, lastName, or walletAddress
+        query["$and"] = [{
+            "$or": [
+                {"firstName": {"$exists": True, "$ne": ""}},
+                {"lastName": {"$exists": True, "$ne": ""}},
+                {"walletAddress": {"$exists": True, "$ne": ""}}
+            ]
+        }]
+
+        users = list(db.users.find(query, {
+            "firstName": 1,
+            "lastName": 1,
+            "walletAddress": 1,
+            "_id": 0  # Exclude the _id field
+        }))
+
+        if not users:
+            return jsonify({
+                "status": "success",
+                "message": "No users found",
+                "users": []
+            })
+
+        # Filter out any None or empty values from the results
+        cleaned_users = []
+        for user in users:
+            cleaned_user = {
+                "firstName": user.get("firstName", ""),
+                "lastName": user.get("lastName", ""),
+                "walletAddress": user.get("walletAddress", "")
+            }
+            cleaned_users.append(cleaned_user)
+
+        return jsonify({
+            "status": "success",
+            "users": cleaned_users
+        })
+
+    except Exception as e:
+        print(f'Search error: {str(e)}')
+        return jsonify({
+            "status": "error",
+            "message": "Error searching users"
+        }), 500
+
+
+@app.route('/properties/<property_id>/transfer', methods=['POST'])
+def transfer_property(property_id):
+    try:
+        
+        data = request.get_json()
+        current_owner = data.get('currentOwner')
+        new_owner = data.get('newOwner')
+        tx_hash = data.get('txHash')
+
+        # Validate input
+        if not all([current_owner, new_owner, tx_hash]):
+            return jsonify({"status": "error", "message": "Missing required fields"}), 400
+
+        # Get the property
+        property_obj = db.properties.find_one({"_id": property_id})
+        if not property_obj:
+            return jsonify({"status": "error", "message": "Property not found"}), 404
+
+        # Verify current owner matches
+        if property_obj['owner'].lower() != current_owner.lower():
+            return jsonify({"status": "error", "message": "Current owner doesn't match"}), 400
+
+        # Verify new owner exists in system
+        new_owner_user = db.users.find_one({"walletAddress": new_owner})
+        if not new_owner_user:
+            return jsonify({"status": "error", "message": "New owner not registered in system"}), 400
+
+        # Update property ownership
+        update_result = db.properties.update_one(
+            {"_id": property_id},
+            {
+                "$set": {
+                    "owner": new_owner,
+                    "previousOwners": property_obj.get('previousOwners', []) + [{
+                        "walletAddress": current_owner,
+                        "transferDate": datetime.utcnow(),
+                        "txHash": tx_hash
+                    }],
+                    "updatedAt": datetime.utcnow()
+                }
+            }
+        )
+
+        if update_result.modified_count == 0:
+            return jsonify({"status": "error", "message": "Failed to update property"}), 500
+
+        # Add transaction to history
+        db.transactions.insert_one({
+            "propertyId": property_id,
+            "fromAddress": current_owner,
+            "toAddress": new_owner,
+            "txHash": tx_hash,
+            "timestamp": datetime.utcnow(),
+            "type": "ownership_transfer"
+        })
+
+        return jsonify({
+            "status": "success",
+            "message": "Property ownership updated successfully"
+        })
+
+    except Exception as e:
+        print(f"Error transferring property: {str(e)}")
+        return jsonify({"status": "error", "message": "Internal server error"}), 500
+
+@app.route('/properties/search', methods=['GET'])
+def search_property():
+    plot_number = request.args.get('plotNumber')
+    if not plot_number:
+        return jsonify({"status": "error", "message": "Plot number is required"}), 400
+    
+    property = db.properties.find_one({"plotNumber": plot_number})
+    if not property:
+        return jsonify({"status": "success", "property": None})
+    
+    # Get owner details
+    owner = db.users.find_one({"walletAddress": property['owner']}, 
+                            {"firstName": 1, "lastName": 1, "walletAddress": 1})
+    
+    serialized_prop = {
+        '_id': str(property['_id']),
+        'title': property.get('title'),
+        'streetAddress': property.get('streetAddress'),
+        'postalCode': property.get('postalCode'),
+        'county': property.get('county'),
+        'plotNumber': property.get('plotNumber'),
+        'owner': property.get('owner'),
+        'status': property.get('status'),
+        'createdAt': property['createdAt'].isoformat() if 'createdAt' in property else None,
+        'ownerDetails': {
+            "firstName": owner['firstName'],
+            "lastName": owner['lastName'],
+            "walletAddress": owner['walletAddress']
+        } if owner else None
+    }
+    
+    return jsonify({
+        "status": "success",
+        "property": serialized_prop
+    })
+
+@app.route('/admin/users/<user_id>/approve', methods=['POST'])
+def approve_user(user_id):
+    try:
+        """ Verify admin
+        if 'wallet_address' not in session or session.get('user_role') != USER_ROLES['ADMIN']:
+            return jsonify({"status": "error", "message": "Unauthorized"}), 403
+        
+        """
+        result = db.users.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$set": {
+                "status": "active",
+                "kycVerified": True,
+                "approvedAt": datetime.utcnow()
+            }}
+        )
+        
+        if result.modified_count == 0:
+            return jsonify({"status": "error", "message": "User not found or already approved"}), 404
+        
+        return jsonify({
+            "status": "success",
+            "message": "User approved successfully"
+        })
+        
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    
 @app.route('/check-session', methods=['GET'])
 def check_session():
+    if 'wallet_address' not in session:
+        return jsonify({"authenticated": False}), 401
     
     user = db.users.find_one({"walletAddress": session['wallet_address']})
     if user:
         return jsonify({
             "authenticated": True,
             "user": {
-                "name": user['name'],
+                "firstName": user['firstName'],
+                "lastName": user['lastName'],
                 "walletAddress": user['walletAddress'],
                 "role": user.get('userRole', USER_ROLES['CLIENT'])
-                }
+            }
         })
     
     return jsonify({"authenticated": False}), 401
-
 def normalize_wallet_address(address):
     """Normalize wallet address by converting to lowercase and stripping whitespace"""
     if not address:
         return None
     return address.strip().lower()
     
+
+def allowed_file(filename):
+    return '.' in filename and \
+           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
 @app.route('/properties', methods=['GET', 'POST'])
 def properties():
     if request.method == 'GET':
         # Get properties for the current user
         wallet_address = request.args.get('owner')
-       ## print(wallet_address)
         if not wallet_address:
             return jsonify({"status": "error", "message": "Owner wallet address is required"}), 400
         
         properties = list(db.properties.find({"owner": wallet_address}))
-        ##print(properties)
         
         if not properties:
             return jsonify({
@@ -99,7 +304,7 @@ def properties():
                 'county': prop.get('county'),
                 'plotNumber': prop.get('plotNumber'),
                 'owner': prop.get('owner'),
-                'status': prop.get('status'),
+                'status': prop.get('status', 'pending'),  # Default to 'pending' if not set
                 'createdAt': prop['createdAt'].isoformat() if 'createdAt' in prop else None,
                 'updatedAt': prop['updatedAt'].isoformat() if 'updatedAt' in prop else None,
             }
@@ -107,12 +312,8 @@ def properties():
             # Add document URLs if they exist
             if 'deedDocument' in prop:
                 serialized_prop['deedDocumentUrl'] = f"/properties/{str(prop['_id'])}/deed"
-            if 'idDocument' in prop:
-                serialized_prop['idDocumentUrl'] = f"/properties/{str(prop['_id'])}/id"
             if 'surveyPlan' in prop:
                 serialized_prop['surveyPlanUrl'] = f"/properties/{str(prop['_id'])}/survey"
-            if 'passportPhoto' in prop:
-                serialized_prop['passportPhotoUrl'] = f"/properties/{str(prop['_id'])}/photo"
         
             serialized_properties.append(serialized_prop)
     
@@ -120,6 +321,98 @@ def properties():
             "status": "success",
             "properties": serialized_properties
         })
+
+    elif request.method == 'POST':
+        # Handle property creation
+        try:
+            # Parse property data
+            property_data = request.form.get('property')
+            if not property_data:
+                return jsonify({"status": "error", "message": "Property data is required"}), 400
+            
+            property_json = json.loads(property_data)
+            
+            # Validate required fields
+            required_fields = ['title', 'streetAddress', 'postalCode', 'county', 'plotNumber', 'owner']
+            for field in required_fields:
+                if not property_json.get(field):
+                    return jsonify({"status": "error", "message": f"{field} is required"}), 400
+
+            # Handle file uploads
+            deed_document = request.files.get('deedDocument')
+            survey_plan = request.files.get('surveyPlan')
+
+            if not deed_document:
+                return jsonify({"status": "error", "message": "Title deed document is required"}), 400
+
+            # Generate unique filenames
+            property_id = str(uuid.uuid4())
+            now = datetime.now()
+            
+            # Save deed document
+            if deed_document and allowed_file(deed_document.filename):
+                deed_filename = f"{property_id}_deed_{secure_filename(deed_document.filename)}"
+                deed_path = os.path.join(UPLOAD_FOLDER, deed_filename)
+                deed_document.save(deed_path)
+            else:
+                return jsonify({"status": "error", "message": "Invalid title deed document"}), 400
+
+            # Save survey plan if provided
+            survey_path = None
+            if survey_plan and allowed_file(survey_plan.filename):
+                survey_filename = f"{property_id}_survey_{secure_filename(survey_plan.filename)}"
+                survey_path = os.path.join(UPLOAD_FOLDER, survey_filename)
+                survey_plan.save(survey_path)
+
+            # Create property document
+            property_doc = {
+                '_id': property_id,
+                'title': property_json['title'],
+                'streetAddress': property_json['streetAddress'],
+                'postalCode': property_json['postalCode'],
+                'county': property_json['county'],
+                'plotNumber': property_json['plotNumber'],
+                'owner': property_json['owner'],
+                'status': 'pending',  # Default status
+                'deedDocument': deed_path,
+                'createdAt': now,
+                'updatedAt': now
+            }
+
+            # Add survey plan if provided
+            if survey_path:
+                property_doc['surveyPlan'] = survey_path
+
+            # Insert into database
+            db.properties.insert_one(property_doc)
+
+            return jsonify({
+                "status": "success",
+                "message": "Property created successfully",
+                "propertyId": property_id
+            })
+
+        except json.JSONDecodeError:
+            return jsonify({"status": "error", "message": "Invalid property data format"}), 400
+        except Exception as e:
+            print(f"Error creating property: {str(e)}")
+            return jsonify({"status": "error", "message": "Failed to create property"}), 500
+
+# Add endpoint to serve property documents
+@app.route('/properties/<property_id>/<document_type>', methods=['GET'])
+def get_property_document(property_id, document_type):
+    if document_type not in ['deed', 'survey']:
+        return jsonify({"status": "error", "message": "Invalid document type"}), 400
+    
+    property = db.properties.find_one({"_id": property_id})
+    if not property:
+        return jsonify({"status": "error", "message": "Property not found"}), 404
+    
+    file_path = property.get(f"{document_type}Document")
+    if not file_path or not os.path.exists(file_path):
+        return jsonify({"status": "error", "message": "Document not found"}), 404
+    
+    return send_file(file_path, as_attachment=True)
         
 @app.route('/properties/<property_id>', methods=['GET', 'PUT', 'DELETE'])
 def property(property_id):
@@ -196,9 +489,6 @@ def property_document(property_id, document_type):
 
 
 
-def allowed_file(filename):
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 @app.route('/login', methods=['POST'])
 def login():
@@ -206,9 +496,20 @@ def login():
     wallet_address = data.get('walletAddress')
     password = data.get('password')
 
+    # Validate required fields
+    if not wallet_address or not password:
+        return jsonify({"status": "error", "message": "Wallet address and password are required"}), 400
+
     user = db.users.find_one({"walletAddress": wallet_address})
     if not user:
         return jsonify({"status": "error", "message": "User not found"}), 404
+
+    # Check if user has required fields
+    if 'firstName' not in user or not user['firstName'] or 'lastName' not in user or not user['lastName']:
+        return jsonify({
+            "status": "error",
+            "message": "User profile incomplete. Please contact support to update your profile details."
+        }), 200
 
     if not bcrypt.checkpw(password.encode('utf-8'), user['password']):
         return jsonify({"status": "error", "message": "Invalid password"}), 401
@@ -220,7 +521,8 @@ def login():
     return jsonify({
         "status": "success",
         "user": {
-            "name": user['name'],
+            "firstName": user['firstName'],
+            "lastName": user['lastName'],
             "walletAddress": user['walletAddress'],
             "role": user.get('userRole', USER_ROLES['CLIENT'])
         },
@@ -247,7 +549,7 @@ def register_user():
         id_document = request.files.get('idDocument')
 
         # Validate required fields
-        if not all([first_name, last_name, wallet_address, password, date_of_birth, id_number]):
+        if not all([first_name, last_name, wallet_address, password, id_number]):
             return jsonify({"status": "error", "message": "All fields are required"}), 400
 
         # Check if user already exists
@@ -326,7 +628,6 @@ def admin_properties():
     
     result = []
     for prop in properties:
-        # Convert MongoDB document to a serializable format
         serialized_prop = {
             '_id': str(prop['_id']),
             'title': prop.get('title'),
@@ -338,17 +639,15 @@ def admin_properties():
             'status': prop.get('status'),
             'createdAt': prop['createdAt'].isoformat() if 'createdAt' in prop else None,
             'updatedAt': prop['updatedAt'].isoformat() if 'updatedAt' in prop else None,
-            'deedDocument': str(prop['deedDocument']) if 'deedDocument' in prop else None,
-            'idDocument': str(prop['idDocument']) if 'idDocument' in prop else None,
-            'passportPhoto': str(prop['passportPhoto']) if 'passportPhoto' in prop else None,
-            'surveyPlan': str(prop['surveyPlan']) if 'surveyPlan' in prop else None
         }
         
-        # Add owner details
-        owner = db.users.find_one({"walletAddress": prop['owner']}, {"name": 1, "walletAddress": 1})
+        # Add owner details with firstName and lastName
+        owner = db.users.find_one({"walletAddress": prop['owner']}, 
+                                {"firstName": 1, "lastName": 1, "walletAddress": 1})
         if owner:
             serialized_prop['ownerDetails'] = {
-                "name": owner['name'],
+                "firstName": owner['firstName'],
+                "lastName": owner['lastName'],
                 "walletAddress": owner['walletAddress']
             }
         
@@ -366,9 +665,10 @@ def verify_property(property_id, user_wallet):
         return jsonify({"status": "error", "message": "Property not found"}), 404
     
     user = db.users.find_one({"walletAddress": user_wallet})
+    """
     if not user or user.get('userRole') != USER_ROLES['ADMIN']:
         return jsonify({"status": "error", "message": "Unauthorized"}), 403
-    
+    """
     data = request.get_json()
     action = data.get('action')
     reason = data.get('reason', '') if action == 'reject' else ''
@@ -402,7 +702,6 @@ def verify_property(property_id, user_wallet):
 
 @app.route('/admin/users', methods=['GET', 'POST'])
 def admin_users():
-    
     if request.method == 'GET':
         role_filter = request.args.get('role')
         query = {}
@@ -411,20 +710,31 @@ def admin_users():
         
         users = list(db.users.find(query, {"password": 0}))
         
+        # Convert MongoDB documents to JSON-serializable format
+        serialized_users = []
         for user in users:
-            user['_id'] = str(user['_id'])
-            if 'createdAt' in user:
-                user['createdAt'] = user['createdAt'].isoformat()
+            serialized_user = {
+                '_id': str(user['_id']),
+                'firstName': user.get('firstName'),
+                'lastName': user.get('lastName'),
+                'walletAddress': user.get('walletAddress'),
+                'userRole': user.get('userRole'),
+                'status': user.get('status'),
+                'createdAt': user['createdAt'].isoformat() if 'createdAt' in user else None,
+                'idNumber': user.get('idNumber'),
+                'kycVerified': user.get('kycVerified', False)
+            }
+            serialized_users.append(serialized_user)
         
         return jsonify({
             "status": "success",
-            "users": users
+            "users": serialized_users
         })
     
     elif request.method == 'POST':
         data = request.get_json()
         
-        required_fields = ['name', 'walletAddress', 'password', 'userRole']
+        required_fields = ['firstName', 'lastName', 'walletAddress', 'password', 'userRole']
         for field in required_fields:
             if not data.get(field):
                 return jsonify({"status": "error", "message": f"{field} is required"}), 400
@@ -438,7 +748,8 @@ def admin_users():
         hashed_password = bcrypt.hashpw(data['password'].encode('utf-8'), bcrypt.gensalt())
         
         user_data = {
-            "name": data['name'],
+            "firstName": data['firstName'],
+            "lastName": data['lastName'],
             "walletAddress": data['walletAddress'],
             "password": hashed_password,
             "userRole": data['userRole'],
@@ -452,9 +763,66 @@ def admin_users():
         return jsonify({
             "status": "success",
             "message": "User created successfully",
-            "userId": str(user_id)
+            "userId": str(user_id)  # Convert ObjectId to string
         })
 
+@app.route('/admin/users/<user_id>', methods=['GET'])
+def admin_user_details(user_id):
+    try:
+        user = db.users.find_one({"_id": ObjectId(user_id)}, {"password": 0})
+        if not user:
+            return jsonify({"status": "error", "message": "User not found"}), 404
+
+        # Convert to JSON-serializable format
+        user_data = {
+            "_id": str(user["_id"]),
+            "firstName": user.get("firstName"),
+            "lastName": user.get("lastName"),
+            "walletAddress": user.get("walletAddress"),
+            "userRole": user.get("userRole"),
+            "status": user.get("status"),
+            "idNumber": user.get("idNumber"),
+            "kycVerified": user.get("kycVerified", False),
+            "createdAt": user["createdAt"].isoformat() if "createdAt" in user else None
+        }
+
+        # Add document URLs if they exist
+        if "passportPhoto" in user:
+            user_data["passportPhotoUrl"] = f"/admin/users/{str(user['_id'])}/passport"
+        if "idDocument" in user:
+            user_data["idDocumentUrl"] = f"/admin/users/{str(user['_id'])}/idDocument"
+
+        return jsonify({
+            "status": "success",
+            "user": user_data
+        })
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/admin/users/<user_id>/<document_type>', methods=['GET'])
+def user_document(user_id, document_type):
+    try:
+        user = db.users.find_one({"_id": ObjectId(user_id)})
+        if not user:
+            return jsonify({"status": "error", "message": "User not found"}), 404
+
+        if document_type not in ['passport', 'idDocument']:
+            return jsonify({"status": "error", "message": "Invalid document type"}), 400
+
+        doc_field = document_type
+        if doc_field not in user:
+            return jsonify({"status": "error", "message": "Document not found"}), 404
+
+        file_obj = fs.get(user[doc_field])
+        return file_obj.read(), 200, {
+            'Content-Type': 'image/jpeg',
+            'Content-Disposition': f'inline; filename="{file_obj.filename}"'
+        }
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    
 @app.route('/profile/change-password', methods=['POST'])
 def change_password():
     data = request.get_json()
@@ -483,7 +851,6 @@ def change_password():
         "status": "success",
         "message": "Password changed successfully"
     })
-
 
 
 if __name__ == '__main__':

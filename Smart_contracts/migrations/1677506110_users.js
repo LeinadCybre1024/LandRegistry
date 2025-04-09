@@ -1,32 +1,21 @@
-
-// Users contract : for holding user data and methods
-var Users = artifacts.require("Users");  // contract Name
-
-
-// // Property contract : for holding property and methods
-var Properties = artifacts.require("Properties");  
-
-
-// LandRegistry : holds owner-land mapping and ownership transfer
-var LandRegistry = artifacts.require("LandRegistry");
-
-
-
-
-// TransferOwnerShip : holds  ownership transfer and sales
-var transferOfOwnership = artifacts.require("TransferOfOwnership");
-
-
+const Users = artifacts.require("Users");
+const Properties = artifacts.require("Properties");
+const LandRegistry = artifacts.require("LandRegistry");
+const TransferOfOwnership = artifacts.require("TransferOfOwnership");
 
 module.exports = async function(deployer) {
-  // deployment steps
-
+  // Deploy Users contract
   await deployer.deploy(Users);
+  const usersInstance = await Users.deployed();
 
-  // deployer.deploy(Properties);
+  // Deploy Properties contract
+  await deployer.deploy(Properties);
+  const propertiesInstance = await Properties.deployed();
 
-  await deployer.deploy(LandRegistry);
+  // Deploy LandRegistry contract with the address of the deployed Users contract
+  await deployer.deploy(LandRegistry, usersInstance.address);
+  const landRegistryInstance = await LandRegistry.deployed();
 
-  await deployer.deploy(transferOfOwnership,LandRegistry.address);
+  // Deploy TransferOfOwnership contract with the address of the deployed LandRegistry contract
+  await deployer.deploy(TransferOfOwnership, landRegistryInstance.address);
 };
-
