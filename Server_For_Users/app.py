@@ -304,6 +304,7 @@ def properties():
                 'county': prop.get('county'),
                 'plotNumber': prop.get('plotNumber'),
                 'owner': prop.get('owner'),
+                'blockchainPropertyId': prop.get('blockchainPropertyId'),
                 'status': prop.get('status', 'pending'),  # Default to 'pending' if not set
                 'createdAt': prop['createdAt'].isoformat() if 'createdAt' in prop else None,
                 'updatedAt': prop['updatedAt'].isoformat() if 'updatedAt' in prop else None,
@@ -316,6 +317,8 @@ def properties():
                 serialized_prop['surveyPlanUrl'] = f"/properties/{str(prop['_id'])}/survey"
         
             serialized_properties.append(serialized_prop)
+            
+            print(serialized_properties)
     
         return jsonify({
             "status": "success",
@@ -363,6 +366,8 @@ def properties():
                 survey_filename = f"{property_id}_survey_{secure_filename(survey_plan.filename)}"
                 survey_path = os.path.join(UPLOAD_FOLDER, survey_filename)
                 survey_plan.save(survey_path)
+            
+            print(property_json)
 
             # Create property document
             property_doc = {
@@ -375,6 +380,7 @@ def properties():
                 'owner': property_json['owner'],
                 'status': 'pending',  # Default status
                 'deedDocument': deed_path,
+               'blockchainPropertyId': property_json['blockchainPropertyId'],
                 'createdAt': now,
                 'updatedAt': now
             }
@@ -417,7 +423,7 @@ def get_property_document(property_id, document_type):
 @app.route('/properties/<property_id>', methods=['GET', 'PUT', 'DELETE'])
 def property(property_id):
     try:
-        property_obj = db.properties.find_one({"_id": ObjectId(property_id)})
+        property_obj = db.properties.find_one({"_id": property_id})
         if not property_obj:
             return jsonify({"status": "error", "message": "Property not found"}), 404
 
@@ -446,7 +452,7 @@ def property(property_id):
                 if field in property_obj:
                     fs.delete(property_obj[field])
             
-            db.properties.delete_one({"_id": ObjectId(property_id)})
+            db.properties.delete_one({"_id": property_id})
             
             return jsonify({"status": "success", "message": "Property deleted"})
 
@@ -456,7 +462,7 @@ def property(property_id):
 @app.route('/properties/<property_id>/<document_type>', methods=['GET'])
 def property_document(property_id, document_type):
     try:
-        property_obj = db.properties.find_one({"_id": ObjectId(property_id)})
+        property_obj = db.properties.find_one({"_id": property_id})
         if not property_obj:
             return jsonify({"status": "error", "message": "Property not found"}), 404
 
@@ -635,6 +641,7 @@ def admin_properties():
             'postalCode': prop.get('postalCode'),
             'county': prop.get('county'),
             'plotNumber': prop.get('plotNumber'),
+            'blockchainPropertyId': prop.get('blockchainPropertyId'),
             'owner': prop.get('owner'),
             'status': prop.get('status'),
             'createdAt': prop['createdAt'].isoformat() if 'createdAt' in prop else None,
@@ -660,7 +667,7 @@ def admin_properties():
 
 @app.route('/admin/properties/<property_id>/verify/<user_wallet>', methods=['POST'])
 def verify_property(property_id, user_wallet):
-    property_obj = db.properties.find_one({"_id": ObjectId(property_id)})
+    property_obj = db.properties.find_one({"_id": property_id})
     if not property_obj:
         return jsonify({"status": "error", "message": "Property not found"}), 404
     
@@ -690,7 +697,7 @@ def verify_property(property_id, user_wallet):
         update_data['rejectionReason'] = reason
     
     db.properties.update_one(
-        {"_id": ObjectId(property_id)},
+        {"_id": property_id},
         {"$set": update_data}
     )
     
@@ -807,7 +814,7 @@ def user_document(user_id, document_type):
         if not user:
             return jsonify({"status": "error", "message": "User not found"}), 404
 
-        if document_type not in ['passport', 'idDocument']:
+        if document_type not in ['passportPhoto', 'idDocument']:
             return jsonify({"status": "error", "message": "Invalid document type"}), 400
 
         doc_field = document_type

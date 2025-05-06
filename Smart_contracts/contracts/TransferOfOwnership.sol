@@ -2,10 +2,10 @@
 pragma solidity >=0.4.22 <0.9.0;
 
 
-import "./Properties.sol";
+import "./Property.sol";
 import "./LandRegistry.sol";
 
-contract TransferOwnerShip{
+contract TransferOfOwnerShip{
 
     // ######################################################################
     //              TRANSFER OWNERSHIP OF PROPERTY
@@ -434,7 +434,7 @@ contract TransferOwnerShip{
         sale.paymentDone = false;
 
         // change state of property again back to verified
-        propertiesContract.changeStateBackToVerificed(sale.propertyId, msg.sender);
+        propertiesContract.changeStateBackToVerified(sale.propertyId, msg.sender);
 
         return true;
     }

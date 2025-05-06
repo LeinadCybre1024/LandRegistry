@@ -2,7 +2,7 @@
 pragma solidity >=0.4.22 <0.9.0;
 
 
-import "./Properties.sol";
+import "./Property.sol";
 import "./Users.sol";  // Add this import
 
 contract LandRegistry {
@@ -13,13 +13,14 @@ contract LandRegistry {
     Property public propertiesContract;
     Users public usersContract;  // Add this declaration
     
-    constructor(address _usersContractAddress) {  // Update constructor
-        contractOwner = msg.sender;
-        transferOwnershipContractAddress = address(0);
-        transferOwnershipContractAddressUpdated = false;
-        propertiesContract = new Property();
-        usersContract = Users(_usersContractAddress);  // Initialize usersContract
-    }
+   constructor(address _usersContractAddress, address _propertyContractAddress) {
+    contractOwner = msg.sender;
+    transferOwnershipContractAddress = address(0);
+    transferOwnershipContractAddressUpdated = false;
+
+    propertiesContract = Property(_propertyContractAddress);  // Use external Property contract
+    usersContract = Users(_usersContractAddress);
+}
 
     // modifiers 
 
@@ -206,7 +207,7 @@ contract LandRegistry {
         uint256 _propertyId
         ) public onlyRevenueDeptEmployee(getRevenueDeptId(_propertyId)) {
         
-        propertiesContract.changeStateToVerifed(_propertyId, msg.sender);
+        propertiesContract.changeStateBackToVerified(_propertyId, msg.sender);
 
     }
 
